@@ -106,7 +106,8 @@ You will use that URL for `DISCORD_WEBHOOK_URL` in Railway.
 2. Select this repository/branch
 3. Railway will use:
    - `Procfile` (`worker: python3 monitor.py`)
-   - `railway.json` (start command + restart policy)
+   - `start.sh` fallback entrypoint (if Railpack expects a script)
+   - `railway.json` (restart policy)
 
 ### 3) Set Railway variables
 
