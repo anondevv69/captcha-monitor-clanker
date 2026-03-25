@@ -104,7 +104,10 @@ You will use that URL for `DISCORD_WEBHOOK_URL` in Railway.
 
 1. In Railway, click **New Project** -> **Deploy from GitHub Repo**
 2. Select this repository/branch
-3. Railway will use:
+3. Prefer Docker runtime for reliability (fixes `python3: command not found`):
+   - Railway settings -> Build -> enable Dockerfile build
+   - This repo includes `Dockerfile` with Python 3.12 preinstalled
+4. Railway can also use:
    - `Procfile` (`worker: python3 monitor.py`)
    - `start.sh` fallback entrypoint (if Railpack expects a script)
    - `railway.json` (restart policy)

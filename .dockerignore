@@ -1,0 +1,4 @@
+.git
+.gitignore
+__pycache__/
+.captcha_monitor_state.json
