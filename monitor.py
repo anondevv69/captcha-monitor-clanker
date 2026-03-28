@@ -32,10 +32,12 @@ MAX_TRACKED_IDS = 5000
 @dataclass
 class Config:
     base_url: str
+    app_base_url: str
     api_key: str
     poll_interval_seconds: int
     feed_sort: str
     feed_limit: int
+    feed_max_pages: int
     keywords: List[str]
     state_file: Path
     bootstrap_skip_existing: bool
@@ -46,19 +48,28 @@ class Config:
 
     @staticmethod
     def from_env() -> "Config":
-        base_url = os.getenv("CAPTCHA_BASE_URL", "https://proficient-magpie-162.convex.site/").rstrip("/")
+        # Official API: https://docs.captcha.social/api-reference/posts/get-feed
+        base_url = os.getenv("CAPTCHA_BASE_URL", "https://api.captcha.social").rstrip("/")
+        # Human-readable links in alerts (web app). API host is used for JSON calls only.
+        app_base_url = os.getenv("CAPTCHA_APP_BASE_URL", "https://captcha.social").rstrip("/")
         api_key = os.getenv("CAPTCHA_API_KEY", "").strip()
         if not api_key:
             raise ValueError("CAPTCHA_API_KEY is required")
 
         poll_interval_seconds = int(os.getenv("POLL_INTERVAL_SECONDS", "20"))
-        feed_sort = os.getenv("FEED_SORT", "latest").strip().lower()
+        # trending = what's hot now; latest = chronological (see cursor_type in API response).
+        feed_sort = os.getenv("FEED_SORT", "trending").strip().lower()
         if feed_sort not in {"latest", "trending"}:
             raise ValueError("FEED_SORT must be either 'latest' or 'trending'")
 
         feed_limit = int(os.getenv("FEED_LIMIT", "50"))
         if not (1 <= feed_limit <= 50):
             raise ValueError("FEED_LIMIT must be between 1 and 50")
+
+        # Paginate GET /api/v1/feed using next_cursor until has_more is false or this cap is hit.
+        feed_max_pages = int(os.getenv("FEED_MAX_PAGES", "5"))
+        if not (1 <= feed_max_pages <= 50):
+            raise ValueError("FEED_MAX_PAGES must be between 1 and 50")
 
         keywords_env = os.getenv("ALERT_KEYWORDS", "clank,pump,ba3")
         keywords = [k.strip().lower() for k in keywords_env.split(",") if k.strip()]
@@ -85,10 +96,12 @@ class Config:
 
         return Config(
             base_url=base_url,
+            app_base_url=app_base_url,
             api_key=api_key,
             poll_interval_seconds=poll_interval_seconds,
             feed_sort=feed_sort,
             feed_limit=feed_limit,
+            feed_max_pages=feed_max_pages,
             keywords=keywords,
             state_file=state_file,
             bootstrap_skip_existing=bootstrap_skip_existing,
@@ -143,7 +156,12 @@ class CaptchaAPI:
         data = self._request_json("GET", "/api/v1/me")
         return data if isinstance(data, dict) else {}
 
-    def get_feed(self, sort: str, limit: int, cursor: Optional[str] = None) -> Dict[str, Any]:
+    def get_feed(
+        self,
+        sort: str,
+        limit: int,
+        cursor: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         data = self._request_json(
             "GET",
             "/api/v1/feed",
@@ -235,7 +253,14 @@ class Notifier:
 
     def _send_discord(self, message: str) -> None:
         body = {"content": message}
-        self._post_json(self.discord_webhook_url, body)
+        # Discord sits behind Cloudflare; the default Python-urllib User-Agent is often
+        # blocked (HTTP 1010 browser_signature_banned). Use an explicit webhook client UA.
+        ua = os.getenv(
+            "DISCORD_WEBHOOK_USER_AGENT",
+            "DiscordWebhook/1.0 (+https://discord.com)",
+        ).strip()
+        extra = {"User-Agent": ua} if ua else {}
+        self._post_json(self.discord_webhook_url, body, extra_headers=extra)
 
     def _send_telegram(self, message: str) -> None:
         assert self.telegram_bot_token is not None
@@ -249,11 +274,21 @@ class Notifier:
         self._post_json(url, body)
 
     @staticmethod
-    def _post_json(url: str, body: Dict[str, Any]) -> None:
+    def _post_json(
+        url: str,
+        body: Dict[str, Any],
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
         req = Request(
             url=url,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
@@ -274,9 +309,10 @@ class Notifier:
             raise RuntimeError(str(exc)) from exc
 
 
-def parse_feed_payload(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def parse_feed_payload(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[Any]]:
+    """Parse GET /api/v1/feed body: posts, has_more, next_cursor, cursor_type (official API)."""
     posts: List[Dict[str, Any]] = []
-    next_cursor: Optional[str] = None
+    next_cursor: Optional[Any] = None
 
     if isinstance(payload.get("posts"), list):
         posts = [p for p in payload["posts"] if isinstance(p, dict)]
@@ -299,7 +335,7 @@ def parse_feed_payload(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], O
             or data.get("next")
         )
 
-    if not next_cursor:
+    if next_cursor is None:
         next_cursor = (
             payload.get("next_cursor")
             or payload.get("nextCursor")
@@ -307,7 +343,7 @@ def parse_feed_payload(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], O
             or payload.get("next")
         )
 
-    return posts, str(next_cursor) if next_cursor else None
+    return posts, next_cursor
 
 
 def extract_post_id(post: Dict[str, Any]) -> Optional[str]:
@@ -357,7 +393,8 @@ def build_alert_message(
     post: Dict[str, Any],
     found_keywords: Sequence[str],
     addresses: Sequence[str],
-    base_url: str,
+    app_base_url: str,
+    api_base_url: str,
 ) -> str:
     post_id = extract_post_id(post) or "unknown"
     author = extract_author_handle(post)
@@ -372,14 +409,16 @@ def build_alert_message(
         match_parts.append(f"contracts={', '.join(addresses)}")
     match_text = "; ".join(match_parts) if match_parts else "unknown"
 
-    inspect_url = f"{base_url}/api/v1/posts/{post_id}"
+    web_url = f"{app_base_url.rstrip('/')}/post/{post_id}"
+    api_ref = f"{api_base_url.rstrip('/')}/api/v1/posts/{post_id}/replies"
     return (
         "🚨 CAPTCHA feed alert\n"
         f"Author: @{author}\n"
         f"Post ID: {post_id}\n"
         f"Matches: {match_text}\n"
         f"Content: {content}\n"
-        f"Inspect: {inspect_url}"
+        f"Open: {web_url}\n"
+        f"API: {api_ref}"
     )
 
 
@@ -391,11 +430,59 @@ class FeedMonitor:
         self.notifier = notifier
 
     def poll_once(self) -> None:
-        payload = self.api.get_feed(sort=self.config.feed_sort, limit=self.config.feed_limit)
-        posts, _next_cursor = parse_feed_payload(payload)
+        posts: List[Dict[str, Any]] = []
+        cursor: Optional[Any] = None
+        last_cursor_type: Optional[str] = None
+        pages_fetched = 0
+
+        for _ in range(self.config.feed_max_pages):
+            payload = self.api.get_feed(
+                sort=self.config.feed_sort,
+                limit=self.config.feed_limit,
+                cursor=cursor,
+            )
+            if not isinstance(payload, dict):
+                break
+            if last_cursor_type is None and payload.get("cursor_type"):
+                last_cursor_type = str(payload["cursor_type"])
+
+            page_posts, next_cursor = parse_feed_payload(payload)
+            pages_fetched += 1
+            posts.extend(page_posts)
+
+            if not payload.get("has_more"):
+                break
+            if next_cursor is None:
+                break
+            cursor = next_cursor
+
+        # De-dupe by post id while preserving order (pagination overlap is unlikely).
+        seen_ids: Set[str] = set()
+        deduped: List[Dict[str, Any]] = []
+        for post in posts:
+            pid = extract_post_id(post)
+            if not pid or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            deduped.append(post)
+        posts = deduped
+
         if not posts:
-            logging.info("No feed posts found in API response")
+            logging.info(
+                "No feed posts in response (sort=%s pages=%s cursor_type=%s)",
+                self.config.feed_sort,
+                pages_fetched,
+                last_cursor_type,
+            )
             return
+
+        logging.info(
+            "Feed fetch: sort=%s pages=%d posts=%d cursor_type=%s",
+            self.config.feed_sort,
+            pages_fetched,
+            len(posts),
+            last_cursor_type,
+        )
 
         # Process older-to-newer for stable alert ordering.
         posts = list(reversed(posts))
@@ -428,7 +515,13 @@ class FeedMonitor:
             content = extract_content(post)
             found_keywords, addresses = find_matches(content, self.config.keywords)
             if found_keywords or addresses:
-                message = build_alert_message(post, found_keywords, addresses, self.config.base_url)
+                message = build_alert_message(
+                    post,
+                    found_keywords,
+                    addresses,
+                    self.config.app_base_url,
+                    self.config.base_url,
+                )
                 self.notifier.send(message)
                 alerts_sent += 1
 
@@ -438,24 +531,39 @@ class FeedMonitor:
         logging.info("Poll done. scanned=%d alerts_sent=%d", scanned, alerts_sent)
 
 
+def _micro_usdc_to_str(micro: Any) -> str:
+    try:
+        n = int(micro)
+    except (TypeError, ValueError):
+        return str(micro)
+    return f"${n / 1_000_000:.2f}"
+
+
 def log_profile_balance(api: CaptchaAPI) -> None:
+    """Log GET /api/v1/me — see https://docs.captcha.social/api-reference/users/get-me"""
     try:
         me = api.get_me()
     except Exception as exc:  # noqa: BLE001
-        logging.warning("Could not fetch /me profile: %s", exc)
+        logging.warning("Could not fetch /api/v1/me: %s", exc)
         return
 
-    balance = None
-    for key in ("balance_usdc", "usdc_balance", "balance"):
-        if key in me:
-            balance = me[key]
-            break
-
     handle = me.get("handle") or me.get("username") or "unknown"
-    if balance is None:
-        logging.info("Connected to CAPTCHA API as @%s (balance key not found)", handle)
-    else:
-        logging.info("Connected to CAPTCHA API as @%s | USDC balance: %s", handle, balance)
+    display = me.get("display_name") or ""
+    name_part = f"{display} (@{handle})" if display else f"@{handle}"
+
+    earned = me.get("earned_usdc_micro")
+    total_earned = me.get("total_earned_micro")
+    total_spent = me.get("total_spent_micro")
+
+    parts = [f"Connected as {name_part}"]
+    if earned is not None:
+        parts.append(f"earned (engagement) {_micro_usdc_to_str(earned)}")
+    if total_earned is not None:
+        parts.append(f"total earned {_micro_usdc_to_str(total_earned)}")
+    if total_spent is not None:
+        parts.append(f"total spent {_micro_usdc_to_str(total_spent)}")
+
+    logging.info("CAPTCHA profile: %s", " | ".join(parts))
 
 
 def main() -> int:
@@ -492,9 +600,11 @@ def main() -> int:
         return 0
 
     logging.info(
-        "Starting monitor. sort=%s limit=%d interval=%ss keywords=%s dry_run=%s",
+        "Starting monitor. api=%s sort=%s limit=%d max_pages=%d interval=%ss keywords=%s dry_run=%s",
+        config.base_url,
         config.feed_sort,
         config.feed_limit,
+        config.feed_max_pages,
         config.poll_interval_seconds,
         ",".join(config.keywords),
         config.dry_run,
