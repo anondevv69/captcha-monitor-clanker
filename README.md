@@ -22,9 +22,11 @@ Discord and/or Telegram when a post contains:
 ### 1) Requirements
 
 - Python 3.10+
-- Install deps: `pip install -r requirements.txt` (`curl_cffi` is required so HTTPS to
-  `api.captcha.social` passes Cloudflare; plain `urllib` is blocked with HTTP 1010 from
-  typical cloud hosts)
+- Install deps: `pip install -r requirements.txt` (**`curl_cffi`** impersonates a real browser
+  TLS fingerprint/JA3). Plain `urllib` or `requests` + headers alone often still get
+  Cloudflare **1010** (`browser_signature_banned`) from cloud IPs. Optional: set
+  `CURL_IMPERSONATE` (default `chrome124`). Do not set `CAPTCHA_HTTP_USER_AGENT` unless you
+  know you need it — a custom UA can conflict with the impersonated browser profile.
 
 ### 2) Configure environment
 

@@ -138,12 +138,12 @@ class CaptchaAPI:
         payload: Optional[bytes] = None
         headers = {
             "Authorization": f"Bearer {self._api_key}",
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": os.getenv("CAPTCHA_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
         }
-        ua = os.getenv(
-            "CAPTCHA_HTTP_USER_AGENT",
-            "CaptchaMonitor/1.0 (+https://captcha.social)",
-        ).strip()
+        # With impersonate=chrome*, curl_cffi supplies a real Chrome User-Agent + TLS/JA3.
+        # Overriding UA here can mismatch the fingerprint and trigger Cloudflare 1010.
+        ua = os.getenv("CAPTCHA_HTTP_USER_AGENT", "").strip()
         if ua:
             headers["User-Agent"] = ua
         if body is not None:
@@ -275,13 +275,9 @@ class Notifier:
 
     def _send_discord(self, message: str) -> None:
         body = {"content": message}
-        # Discord sits behind Cloudflare; the default Python-urllib User-Agent is often
-        # blocked (HTTP 1010 browser_signature_banned). Use an explicit webhook client UA.
-        ua = os.getenv(
-            "DISCORD_WEBHOOK_USER_AGENT",
-            "DiscordWebhook/1.0 (+https://discord.com)",
-        ).strip()
-        extra = {"User-Agent": ua} if ua else {}
+        # Optional UA override; default is none so impersonate=chrome* matches TLS + UA.
+        ua = os.getenv("DISCORD_WEBHOOK_USER_AGENT", "").strip()
+        extra = {"User-Agent": ua} if ua else None
         self._post_json(self.discord_webhook_url, body, extra_headers=extra)
 
     def _send_telegram(self, message: str) -> None:
@@ -303,7 +299,8 @@ class Notifier:
     ) -> None:
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": os.getenv("CAPTCHA_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
         }
         if extra_headers:
             headers.update(extra_headers)
