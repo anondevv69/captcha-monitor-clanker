@@ -135,6 +135,14 @@ class CaptchaAPI:
             "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",
         }
+        # api.captcha.social is behind Cloudflare; the default Python-urllib User-Agent
+        # is often blocked (HTTP 1010 browser_signature_banned).
+        ua = os.getenv(
+            "CAPTCHA_HTTP_USER_AGENT",
+            "CaptchaMonitor/1.0 (+https://captcha.social)",
+        ).strip()
+        if ua:
+            headers["User-Agent"] = ua
         if body is not None:
             payload = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
