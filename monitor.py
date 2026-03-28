@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from curl_cffi import requests as cf_requests
 
@@ -176,6 +176,15 @@ class CaptchaAPI:
 
     def get_my_balance(self) -> Dict[str, Any]:
         data = self._request_json("GET", "/api/v1/me/balance")
+        return data if isinstance(data, dict) else {}
+
+    def get_user(self, handle: str) -> Dict[str, Any]:
+        """GET /api/v1/users/:handle — profile including follower_count (see API docs)."""
+        h = handle.strip().lstrip("@")
+        if not h:
+            return {}
+        path = f"/api/v1/users/{quote(h, safe='')}"
+        data = self._request_json("GET", path)
         return data if isinstance(data, dict) else {}
 
     def get_feed(
@@ -394,6 +403,27 @@ def extract_author_handle(post: Dict[str, Any]) -> str:
     return "unknown"
 
 
+def extract_author_display_name(post: Dict[str, Any]) -> str:
+    author = post.get("author")
+    if isinstance(author, dict):
+        name = author.get("display_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return ""
+
+
+def format_post_time_utc(post: Dict[str, Any]) -> str:
+    raw = post.get("created_at")
+    if raw is None:
+        return "unknown"
+    try:
+        ms = int(raw)
+        dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OSError):
+        return str(raw)
+
+
 def find_matches(content: str, keywords: Sequence[str]) -> Tuple[List[str], List[str]]:
     normalized = content.lower()
 
@@ -414,13 +444,19 @@ def build_alert_message(
     found_keywords: Sequence[str],
     addresses: Sequence[str],
     app_base_url: str,
-    api_base_url: str,
+    *,
+    follower_count: Optional[int] = None,
+    following_count: Optional[int] = None,
 ) -> str:
     post_id = extract_post_id(post) or "unknown"
-    author = extract_author_handle(post)
-    content = extract_content(post).strip().replace("\n", " ")
-    if len(content) > 350:
-        content = f"{content[:347]}..."
+    handle = extract_author_handle(post)
+    display = extract_author_display_name(post)
+    if display:
+        who = f"{display} (@{handle})"
+    else:
+        who = f"@{handle}" if handle != "unknown" else "unknown"
+
+    posted = format_post_time_utc(post)
 
     match_parts: List[str] = []
     if found_keywords:
@@ -429,18 +465,38 @@ def build_alert_message(
         match_parts.append(f"contracts={', '.join(addresses)}")
     match_text = "; ".join(match_parts) if match_parts else "unknown"
 
-    web_url = f"{app_base_url.rstrip('/')}/post/{post_id}"
-    # GET /api/v1/posts/:id — single post (parent_chain + replies per API docs)
-    api_ref = f"{api_base_url.rstrip('/')}/api/v1/posts/{post_id}"
-    return (
-        "🚨 CAPTCHA feed alert\n"
-        f"Author: @{author}\n"
-        f"Post ID: {post_id}\n"
-        f"Matches: {match_text}\n"
-        f"Content: {content}\n"
-        f"Open: {web_url}\n"
-        f"API: {api_ref}"
+    # Full post text; Discord hard-limits messages to 2000 chars — cap body via env.
+    max_body = int(os.getenv("ALERT_MAX_CONTENT_CHARS", "1600"))
+    raw_content = extract_content(post).strip()
+    if len(raw_content) > max_body:
+        body = raw_content[:max_body] + "\n…(truncated — raise ALERT_MAX_CONTENT_CHARS if needed)"
+    else:
+        body = raw_content
+
+    lines: List[str] = [
+        "🚨 CAPTCHA feed alert",
+        f"Who: {who}",
+    ]
+    if follower_count is not None or following_count is not None:
+        fc = follower_count if follower_count is not None else "?"
+        fl = following_count if following_count is not None else "?"
+        lines.append(f"Followers: {fc} · Following: {fl}")
+    lines.extend(
+        [
+            f"Posted: {posted}",
+            f"Post ID: {post_id}",
+            f"Matches: {match_text}",
+            "",
+            body,
+            "",
+            f"Open: {app_base_url.rstrip('/')}/post/{post_id}",
+        ]
     )
+    msg = "\n".join(lines)
+    # Final guard for Discord 2000-char webhook content limit
+    if len(msg) > 1990:
+        msg = msg[:1987] + "…"
+    return msg
 
 
 class FeedMonitor:
@@ -536,12 +592,35 @@ class FeedMonitor:
             content = extract_content(post)
             found_keywords, addresses = find_matches(content, self.config.keywords)
             if found_keywords or addresses:
+                follower_count: Optional[int] = None
+                following_count: Optional[int] = None
+                ah = extract_author_handle(post)
+                fetch_stats = os.getenv("ALERT_FETCH_AUTHOR_STATS", "true").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                }
+                if fetch_stats and ah and ah != "unknown":
+                    try:
+                        prof = self.api.get_user(ah)
+                        fc = prof.get("follower_count")
+                        fl = prof.get("following_count")
+                        if fc is not None:
+                            follower_count = int(fc)
+                        if fl is not None:
+                            following_count = int(fl)
+                    except (TypeError, ValueError) as exc:
+                        logging.debug("get_user(%s) parse counts: %s", ah, exc)
+                    except Exception as exc:  # noqa: BLE001
+                        logging.debug("get_user(%s) for alert: %s", ah, exc)
+
                 message = build_alert_message(
                     post,
                     found_keywords,
                     addresses,
                     self.config.app_base_url,
-                    self.config.base_url,
+                    follower_count=follower_count,
+                    following_count=following_count,
                 )
                 self.notifier.send(message)
                 alerts_sent += 1

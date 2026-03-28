@@ -45,6 +45,10 @@ export FEED_SORT="trending"   # trending | latest
 export FEED_LIMIT="50"        # 1..50
 export FEED_MAX_PAGES="5"     # feed pages per poll (cursor pagination)
 
+# Alerts: full post text (Discord max ~2000 chars total); optional author stats via GET /users/:handle
+export ALERT_MAX_CONTENT_CHARS="1600"
+export ALERT_FETCH_AUTHOR_STATS="true"   # set false to skip extra API call per alert
+
 # Skip sending alerts for currently visible feed on first run
 export BOOTSTRAP_SKIP_EXISTING="true"
 
