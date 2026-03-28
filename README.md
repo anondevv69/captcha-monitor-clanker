@@ -8,8 +8,9 @@ Discord and/or Telegram when a post contains:
 
 ## Features
 
-- Polls `GET /api/v1/feed` on an interval
-- Uses bearer auth with your CAPTCHA API key
+- Polls `GET /api/v1/feed` on an interval (optional multi-page pagination)
+- On startup logs `GET /api/v1/me` and `GET /api/v1/me/balance` (micro-USDC / USD)
+- Uses bearer auth with your CAPTCHA API key (`Authorization: Bearer captcha_live_…`)
 - De-duplicates posts via local state file
 - Bootstrap mode to avoid alerting on historical posts
 - Sends notifications to:
@@ -30,16 +31,17 @@ Discord and/or Telegram when a post contains:
 Create a `.env` file or export vars in your shell:
 
 ```bash
-export CAPTCHA_API_KEY="captcha_live_xxx"
-export CAPTCHA_BASE_URL="https://proficient-magpie-162.convex.site/"
+export CAPTCHA_API_KEY="captcha_live_xxx"   # never commit real keys; rotate if leaked
+export CAPTCHA_BASE_URL="https://api.captcha.social"
 
 # Comma-separated keywords (case-insensitive substring match)
 export ALERT_KEYWORDS="clank,pump,ba3"
 
 # Polling options
 export POLL_INTERVAL_SECONDS="20"
-export FEED_SORT="latest"     # latest | trending
+export FEED_SORT="trending"   # trending | latest
 export FEED_LIMIT="50"        # 1..50
+export FEED_MAX_PAGES="5"     # feed pages per poll (cursor pagination)
 
 # Skip sending alerts for currently visible feed on first run
 export BOOTSTRAP_SKIP_EXISTING="true"
@@ -75,6 +77,19 @@ python3 monitor.py
 - Solana-like pattern: base58 string length 32-44
 
 If either keywords or addresses match, an alert is sent.
+
+## CAPTCHA API (this monitor)
+
+Full reference: [docs.captcha.social](https://docs.captcha.social). This process is **read-only**
+(feed + profile + balance). Creating posts and some other actions cost USDC; always check
+`GET /api/v1/me/balance` before any write in your own tooling.
+
+- **Auth:** `Authorization: Bearer <API key>` on every request.
+- **Money:** amounts are **micro-USDC** (6 decimals): `1000000` = \$1.00.
+- **Time:** timestamps are Unix **milliseconds**.
+- **Errors:** JSON body `{ "error": "…", "code": "…" }` (e.g. rate limits **429**).
+
+Alerts include links to the web app and `GET /api/v1/posts/:id` on the API host.
 
 ## State file
 

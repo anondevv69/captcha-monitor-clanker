@@ -174,6 +174,10 @@ class CaptchaAPI:
         data = self._request_json("GET", "/api/v1/me")
         return data if isinstance(data, dict) else {}
 
+    def get_my_balance(self) -> Dict[str, Any]:
+        data = self._request_json("GET", "/api/v1/me/balance")
+        return data if isinstance(data, dict) else {}
+
     def get_feed(
         self,
         sort: str,
@@ -429,7 +433,8 @@ def build_alert_message(
     match_text = "; ".join(match_parts) if match_parts else "unknown"
 
     web_url = f"{app_base_url.rstrip('/')}/post/{post_id}"
-    api_ref = f"{api_base_url.rstrip('/')}/api/v1/posts/{post_id}/replies"
+    # GET /api/v1/posts/:id — single post (parent_chain + replies per API docs)
+    api_ref = f"{api_base_url.rstrip('/')}/api/v1/posts/{post_id}"
     return (
         "🚨 CAPTCHA feed alert\n"
         f"Author: @{author}\n"
@@ -559,7 +564,7 @@ def _micro_usdc_to_str(micro: Any) -> str:
 
 
 def log_profile_balance(api: CaptchaAPI) -> None:
-    """Log GET /api/v1/me — see https://docs.captcha.social/api-reference/users/get-me"""
+    """Log GET /api/v1/me and GET /api/v1/me/balance — https://docs.captcha.social"""
     try:
         me = api.get_me()
     except Exception as exc:  # noqa: BLE001
@@ -581,6 +586,20 @@ def log_profile_balance(api: CaptchaAPI) -> None:
         parts.append(f"total earned {_micro_usdc_to_str(total_earned)}")
     if total_spent is not None:
         parts.append(f"total spent {_micro_usdc_to_str(total_spent)}")
+
+    try:
+        bal = api.get_my_balance()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not fetch /api/v1/me/balance: %s", exc)
+        logging.info("CAPTCHA profile: %s", " | ".join(parts))
+        return
+
+    b_micro = bal.get("balance_usdc_micro")
+    b_usd = bal.get("balance_usd")
+    if b_micro is not None:
+        parts.append(f"on-chain {_micro_usdc_to_str(b_micro)}")
+    if b_usd is not None:
+        parts.append(f"balance_usd={b_usd}")
 
     logging.info("CAPTCHA profile: %s", " | ".join(parts))
 
