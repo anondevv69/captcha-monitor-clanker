@@ -20,7 +20,10 @@ Discord and/or Telegram when a post contains:
 
 ### 1) Requirements
 
-- Python 3.10+ (standard library only; no external dependency required)
+- Python 3.10+
+- Install deps: `pip install -r requirements.txt` (`curl_cffi` is required so HTTPS to
+  `api.captcha.social` passes Cloudflare; plain `urllib` is blocked with HTTP 1010 from
+  typical cloud hosts)
 
 ### 2) Configure environment
 

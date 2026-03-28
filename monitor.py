@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+
+from curl_cffi import requests as cf_requests
 
 
 ETH_ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
@@ -27,6 +27,11 @@ ETH_ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 SOL_ADDRESS_RE = re.compile(r"(?<![A-Za-z0-9])[1-9A-HJ-NP-Za-km-z]{32,44}(?![A-Za-z0-9])")
 
 MAX_TRACKED_IDS = 5000
+
+
+def _curl_impersonate() -> str:
+    """Browser profile for TLS/JA3 (Cloudflare 1010 blocks Python's default SSL fingerprint)."""
+    return os.getenv("CURL_IMPERSONATE", "chrome124").strip() or "chrome124"
 
 
 @dataclass
@@ -135,8 +140,6 @@ class CaptchaAPI:
             "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",
         }
-        # api.captcha.social is behind Cloudflare; the default Python-urllib User-Agent
-        # is often blocked (HTTP 1010 browser_signature_banned).
         ua = os.getenv(
             "CAPTCHA_HTTP_USER_AGENT",
             "CaptchaMonitor/1.0 (+https://captcha.social)",
@@ -147,18 +150,25 @@ class CaptchaAPI:
             payload = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        req = Request(url=url, data=payload, headers=headers, method=method)
+        imp = _curl_impersonate()
         try:
-            with urlopen(req, timeout=20) as resp:
-                raw = resp.read()
-                if not raw:
-                    return {}
-                return json.loads(raw.decode("utf-8"))
-        except HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"{method} {path} failed ({exc.code}): {body_text}") from exc
-        except URLError as exc:
+            r = cf_requests.request(
+                method,
+                url,
+                headers=headers,
+                data=payload,
+                timeout=20,
+                impersonate=imp,
+            )
+        except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"{method} {path} failed: {exc}") from exc
+
+        if r.status_code >= 400:
+            raise RuntimeError(f"{method} {path} failed ({r.status_code}): {r.text}")
+
+        if not r.content:
+            return {}
+        return json.loads(r.content.decode("utf-8"))
 
     def get_me(self) -> Dict[str, Any]:
         data = self._request_json("GET", "/api/v1/me")
@@ -293,28 +303,29 @@ class Notifier:
         }
         if extra_headers:
             headers.update(extra_headers)
-        req = Request(
-            url=url,
-            data=json.dumps(body).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
+        data = json.dumps(body).encode("utf-8")
+        imp = _curl_impersonate()
         try:
-            with urlopen(req, timeout=20) as resp:
-                if resp.status >= 400:
-                    raise RuntimeError(f"HTTP {resp.status}")
-                raw = resp.read()
-                if raw:
-                    maybe_json = raw.decode("utf-8", errors="replace").strip()
-                    if maybe_json and maybe_json.startswith("{"):
-                        payload = json.loads(maybe_json)
-                        if payload.get("ok") is False:
-                            raise RuntimeError(f"Telegram error: {payload}")
-        except HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {exc.code}: {body_text}") from exc
-        except URLError as exc:
+            r = cf_requests.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=20,
+                impersonate=imp,
+            )
+        except Exception as exc:  # noqa: BLE001
             raise RuntimeError(str(exc)) from exc
+
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+
+        raw = r.content
+        if raw:
+            maybe_json = raw.decode("utf-8", errors="replace").strip()
+            if maybe_json and maybe_json.startswith("{"):
+                payload = json.loads(maybe_json)
+                if payload.get("ok") is False:
+                    raise RuntimeError(f"Telegram error: {payload}")
 
 
 def parse_feed_payload(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[Any]]:
